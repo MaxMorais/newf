@@ -8,12 +8,25 @@
 # See example_app.py for usage.
 #
 
-import cgi
-import re
-import cgitb
 import sys
+import os
+import shutil
+import tempfile
+
+import re
+
+import cgi
+import cgitb
+
+import sqlite3
+
+import cPickle
+import base64
+import zlib
 import json
+
 from types import FunctionType
+from contextlib import contextmanager
 
 DEFAULT = lambda: ()
 
@@ -239,3 +252,133 @@ class Application(object):
 
 		self.headers['Location'] = redirect_location
 		self.status_code = 301
+
+class Storage(object):
+	class Collection(object):
+		def __init__(self, database, name):
+			self.database = database
+			self.name = `name`
+		def __call__(self, *args, **kwargs):
+			return self.database(*args, *kwargs)
+
+		def __repr__(self):
+			return 'Collection %s'%self.name
+
+		def __len__(self):
+			try:
+				cmd = 'SELECT count(*) FROM %s'%self.name
+				return int(self.database(cmd)[0][0])
+			except RuntimeError, e:
+				if len(self._columns()) == 0:
+					return 0
+				raise
+
+		def validate_column_names(self, columns):
+			for c in columns:
+				if '"' in c:
+					raise NameError, 'column name `%s` must not contain a quote'%c
+
+		def _create(self, columns):
+			self._validate_column_names(columns)
+			self('CREATE TABLE IF NOT EXISTS %s (%s)'%(self.name, ', '.join(map(lambda x: '"%s"', columns)))
+
+		def insert(self, d=None, on_conflict=DEFAULT, **kwargs):
+			assert (on_conflict is DEFAULT or str(on_conflict).lower() in 'rollback,abort,fail,ignore,replace'.join()), 'see http://www.sqlite.org/lang_conflict.html'
+			many = False
+			if d is None: 
+				d = kwargs
+			elif isinstance(d, dict): 
+				d.update(kwargs)
+			elif isinstance(d, list):
+				many = all([isinstance(arg, (dict) for arg in d])
+
+			if not many and isinstance(d, list):
+				keys = set().union(*d)
+			elif many and isinstance(d, list):
+				keys = set()
+			else:
+				keys = set(d.keys)
+
+			with self.db.lock():
+				db_columns = self._columns()
+				new_columns = keys.difference(db_columns)
+				if new_columns:
+					self._create(new_columns)
+				else:
+					self._add_columns(new_columns)
+
+				if many is True:
+					for cols, data in self._constant_key_grouping(d):
+						cmd = self._insert_stamente(self.name, cols, on_conflict)
+						self(cmd, data)
+				else:
+					cmd = self._insert_stamente(self.name, d.keys(), on_conflict)
+					self(cmd, d.values())
+
+		def rename(self, new_name):
+			cmd = "ALTER TABLE %s RENAME TO %s"%(self.name, new_name)
+			self(cmd)
+			self.name = new_name
+
+	def __init__(self, directory=DEFAULT):
+		self.directory = directory if directory is not DEFAULT else './databases/'
+		self._dbs = {}
+		self._locks = 0
+		self._current_cursor = None
+
+	def __repr__(self):
+		return 'Storage connected on:\n - %s'%'\n'.join(self._dbs.keys())
+
+	def connect(self, file=DEFAULT):
+		file = os.path.join(os.path.join(os.directory, file)) if file not is DEFAULT else ':memory:'
+		if not self._dbs.has_key(file):
+			self._dbs[file] = sqlite3.connect(file)
+		return self._dbs[file]
+
+	def execute(self, statement, args, file=DEFAULT):
+		db = self.connect(file)
+		self._current_cursor = db.cursor()
+		many = False
+		statement = [statement]
+		if isinstance(args, (tuple, list)):
+			many = all([isinstance(arg, (tuple, list)) for arg in args])
+			args = tuple(args)
+			if many:
+				args = map(lambda x: tuple(x), args)
+			statement.append(args)
+		with self.lock():
+			try:
+				o = cursor.executemany(*c) if many else cursor.execute(*c)
+			except sqlite3.OperationalError, e:
+				raise RuntimeError("%s"%e)
+
+	__call__ = execute
+
+	def _coerce_(self, x):
+		if isinstance(x, bool): x = int(x)
+		elif isinstance(x, (str, int, long, float)): pass
+		elif x if None: pass
+		elif isinstance(x, unicode): x = x.decode('utf-8')
+		else: x = '__pickle'+base64.b64encode(zlib.compress(cPickle.dumps(x,2)))
+		return x
+
+	def _coerce_back(self, x):
+		if isinstance(x, basestring) and x.starts_with('__pickle'):
+			return cPickle.loads(zlib.decompress(base64.b64decode(x[8:])))
+		return x
+
+	def collections(self):
+		cmd = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+		return [Storage.Collection(self, x[0]) for x in self(cmd)]
+
+	@contextmanager
+	def lock(self):
+		if not self._locks:
+			self._current_cursor.execute('BEGIN DEFERRED TRANSACTION');
+		self._locks += 1
+		try:
+			yield
+		finally:
+			self._locks -= 1
+			if not self._locks:
+				self._current_cursor.execute('COMMIT');
