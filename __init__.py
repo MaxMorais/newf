@@ -12,6 +12,12 @@ import cgi
 import re
 import cgitb
 import sys
+import json
+from types import FunctionType
+
+class classproperty(property):
+    def __get__(self, cls, owner):
+        return classmethod(self.fget).__get__(None, owner)()
 
 class Request(object):
     
@@ -25,13 +31,19 @@ class Request(object):
         if environ.has_key('beaker.session'):
             self.session = environ['beaker.session']
         
-        if len(environ['QUERY_STRING']):
+        if environ['QUERY_STRING']:
             self.GET = cgi.parse_qs(environ['QUERY_STRING'])
         
         if self.method == 'POST':
             self.POST = cgi.FieldStorage(fp=environ['wsgi.input'], 
                                          environ=environ, 
                                          keep_blank_values=1)
+    def __dict__(self):
+        return {
+            'method': self.method,
+            'POST': self.POST,
+            'GET': self.GET,
+        }
 
 class Response(object):
     
@@ -86,7 +98,16 @@ class Response(object):
         
         if not 'content-type' in self.headers:
             self.headers['content-type'] = 'text/html'
-        
+
+    @property
+    def json(self):
+        self.headers['content-type']
+        try:
+            self.set_content(json.dumps(self._content))
+        except Exception, e:
+            raise
+        return self
+
     def get_status(self):
         if self.status_code not in self.codes:
             self.status_code = 500
@@ -112,26 +133,97 @@ class Response(object):
     
 class ResponseRedirect(Response):
     def __init__(self, redirect_location):
-        super(ResponseRedirect, self).__init__()
-        self.headers['Location'] = redirect_location
-        self.status_code = 301
-    
+        super(ResponseRedirect, self).__init__(status_code=303, headers={'location':redirect_location})
+
 class Application(object):
-    
-    def __init__(self, urls, debug=False, system_error_msg='<h1>500 Error</h1><pre>Got Exception: %s</pre>'):
+    _raw_urls = []
+    def __init__(self, urls=[], debug=False, system_error_msg='<h1>500 Error</h1><pre>Got Exception: %s</pre>'):
+        import pprint
         self.debug = debug
         self.system_error_msg = system_error_msg
-        self.urls = tuple((re.compile(a), b) for a,b in urls)
+        if urls is not None: 
+            self._raw_urls += urls
+        pprint.pprint(self._raw_urls)
+        self.urls = tuple([(re.compile(a), b) for (a,b) in self._raw_urls])
+
+    @classmethod
+    def route(cls, route_or_function=None, slashed=False, pattern=None):
+        def inject_context(function):
+            nglobals = globals().copy()
+            # inject or replace self in function 
+            # self is a alias for Application Class
+            nglobals['self'] = cls
+            # inject a alias for response in function context
+            nglobals['response'] = cls.response
+            # inject a alias for redirect
+            nglobals['redirect'] = cls.redirect
+
+            def lazy_request(self): 
+                return cls._lazy_request
+
+            # inject a alias for request
+            nglobals['request'] = property(lazy_request)
+
+            return FunctionType(
+                function.func_code,
+                nglobals,
+                function.func_name,
+                function.func_defaults,
+                function.func_closure            
+            )
+
+        def decorator(function):
+            route = route_or_function.func_name
+            fnew =  inject_context(route_or_function)
+            if not pattern:
+                if slashed:
+                    route = route.replace('_', '-')
+                route = '^/'+route+'$'
+            elif slashed:
+                route = route.replace('_', '-')
+            else:
+                route = pattern
+            print "[ROUTE]", route, "=>", fnew.func_name
+            cls._raw_urls.append((route, fnew))
+            return fnew
+            
+        if isinstance(route_or_function, FunctionType):
+            return decorator(route_or_function)
+        elif isinstance(route_or_function, basestring):
+            # redefine the decorator function
+            def decorator(function):
+                return cls.route(function, slashed=slashed, pattern=route_or_function)
+        elif slashed is True or pattern is not None:
+            # replace the decorator function
+            def decorator(function):
+                return cls.route(function, slashed=slashed, pattern=pattern)
+        else:
+            raise TypeError, 'route requires a route or function not %s'%str(type(route_or_function))
+
+        return decorator
+
+    @staticmethod
+    def response(content, headers={}, status_code=200):
+        return Response(content, headers, status_code)
+
+    @staticmethod
+    def redirect(location):
+        return ResponseRedirect(location)
     
+    @classproperty
+    def request(cls):
+        return cls._lazy_request
+
     def __call__(self, environ, start_response):
-        request = Request(environ)
+        self._lazy_request = request = Request(environ)
         response = None
 
         for url in self.urls:
             match = url[0].match(environ['PATH_INFO'])
             if match:
                 try:
-                    response = url[1](request, **match.groupdict())
+                    #request, **match.groupdict()
+                    response = url[1]()
                 except Exception, e:
                     msg = self.system_error_msg % e
                     if self.debug:
@@ -148,3 +240,6 @@ class Application(object):
 
         start_response(response.status, response.get_headers())
         return response.content
+
+        self.headers['Location'] = redirect_location
+        self.status_code = 301
