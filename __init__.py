@@ -15,6 +15,8 @@ import sys
 import json
 from types import FunctionType
 
+DEFAULT = lambda: ()
+
 class classproperty(property):
 	def __get__(self, cls, owner):
 		return classmethod(self.fget).__get__(None, owner)()
@@ -138,12 +140,10 @@ class ResponseRedirect(Response):
 class Application(object):
 	_raw_urls = []
 	def __init__(self, urls=[], debug=False, system_error_msg='<h1>500 Error</h1><pre>Got Exception: %s</pre>'):
-		import pprint
 		self.debug = debug
 		self.system_error_msg = system_error_msg
 		if urls is not None: 
 			self._raw_urls += urls
-		pprint.pprint(self._raw_urls)
 		self.urls = tuple([(re.compile(a), b) for (a,b) in self._raw_urls])
 
 	@classmethod
@@ -158,7 +158,7 @@ class Application(object):
 				route = route.replace('_', '-')
 			else:
 				route = pattern
-			cls._raw_urls.append((route, fnew))
+			cls._raw_urls.append((route, function))
 			return function
 			
 		if isinstance(route_or_function, FunctionType):
