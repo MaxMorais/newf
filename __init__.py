@@ -148,33 +148,8 @@ class Application(object):
 
     @classmethod
     def route(cls, route_or_function=None, slashed=False, pattern=None):
-        def inject_context(function):
-            nglobals = globals().copy()
-            # inject or replace self in function 
-            # self is a alias for Application Class
-            nglobals['self'] = cls
-            # inject a alias for response in function context
-            nglobals['response'] = cls.response
-            # inject a alias for redirect
-            nglobals['redirect'] = cls.redirect
-
-            def lazy_request(self): 
-                return cls._lazy_request
-
-            # inject a alias for request
-            nglobals['request'] = property(lazy_request)
-
-            return FunctionType(
-                function.func_code,
-                nglobals,
-                function.func_name,
-                function.func_defaults,
-                function.func_closure            
-            )
-
         def decorator(function):
             route = route_or_function.func_name
-            fnew =  inject_context(route_or_function)
             if not pattern:
                 if slashed:
                     route = route.replace('_', '-')
@@ -183,9 +158,8 @@ class Application(object):
                 route = route.replace('_', '-')
             else:
                 route = pattern
-            print "[ROUTE]", route, "=>", fnew.func_name
             cls._raw_urls.append((route, fnew))
-            return fnew
+            return function
             
         if isinstance(route_or_function, FunctionType):
             return decorator(route_or_function)
@@ -218,12 +192,32 @@ class Application(object):
         self._lazy_request = request = Request(environ)
         response = None
 
-        for url in self.urls:
-            match = url[0].match(environ['PATH_INFO'])
+        def inject_context(context, function):
+            nglobals = globals().copy()
+            # inject or replace self in function 
+            # self is a alias for Application Class
+            nglobals['self'] = context
+            # inject a alias for response in function context
+            nglobals['response'] = context.response
+            # inject a alias for redirect
+            nglobals['redirect'] = context.redirect
+            # inject a alias for request
+            nglobals['request'] = conext.request
+
+            return FunctionType(
+                function.func_code,
+                nglobals,
+                function.func_name,
+                function.func_defaults,
+                function.func_closure            
+            )
+
+        for pattern, callback in self.urls:
+            match = pattern.match(environ['PATH_INFO'])
             if match:
                 try:
                     #request, **match.groupdict()
-                    response = url[1]()
+                    response = inject_context(self, callback)()
                 except Exception, e:
                     msg = self.system_error_msg % e
                     if self.debug:
