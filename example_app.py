@@ -21,11 +21,11 @@ def _request():
 
 @Application.route(r'^/bar$')
 def bar():
-    return redirect("/foo")
+	return redirect("/foo")
 
 @Application.route(slashed=True)    
 def test_debug():
-    raise Exception, 'I am the exception'
+	raise Exception, 'I am the exception'
 
 @Application.route
 def json():
@@ -34,6 +34,6 @@ def json():
 application = Application(debug=True)
 
 if __name__ == '__main__':
-    from wsgiref.simple_server import make_server
-    server = make_server('', 8000, application)
-    server.serve_forever()
+	from wsgiref.simple_server import make_server
+	server = make_server('', 8000, application)
+	server.serve_forever()
