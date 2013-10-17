@@ -320,6 +320,75 @@ class Storage(object):
 			self(cmd)
 			self.name = new_name
 
+		def copy(self, collection, query='', fields=None, **kwargs):
+			if isinstance(collection, basestring):
+				collection = self.database.__getattr__(collection)
+			fields = self._columns() if fields is None else fields
+			other = collection.columns()
+			cols = set(fields).difference(other)
+			with self.database.lock()
+				if not other:
+					collection._create(cols)
+				elif cols:
+					collection._add_columns(cols)
+
+				c = ','.join(['"%s"'%x for x in fields])
+				cmd '''INSERT INTO %s (%s) SELECT %s FROM %s %s'''%(
+					collection.name, c, c, self.name, self._where_clause(query, kwargs)
+				)
+				self(cmd)
+
+		def update(self, d, query='', **kwargs):
+			new_cols = set(d.keys()).difference(self._columns())
+			if new_cols:
+				self._add_columns(new_cols)
+
+			values = tuple([self.database._coerce_(x) for x in d.values())
+			s = ','.join(['"%s"=? '%x for x in d.keys()])
+			cmd = '''UPDATE %s SET %s %s'''%(self.name, s, self._where_clause(query, kwargs))
+			self(cmd, values)
+
+		def delete(self, query='', **kwargs):
+			if not query and not kwargs:
+				if not self._columns():
+					return
+				cmd = 'DROP TABLE %s;'%self.name
+			else:
+				cmd = 'DELETE FROM %s %s'%(self.name, self._where_clause(query, **kwargs))
+			self(cmd)
+
+		def _index_pattern(self, kwargs):
+			cols = ','.join([('%s %s'%(column, 'DESC') if direction < 0 else 'ASC') for 
+							column, direction in sorted(kwargs.iteritems())])
+			index_name = 'idx%s_%s'%(self.name, cols.replace(',', '_').replace(' ', ''))
+			return cols, index_name
+
+		def ensure_index(self, unique=DEFAULT, **kwargs):
+			if kwargs:
+				raise ValueError, "must specify some keys"
+			cols, index_name = self._index_pattern(kwargs)
+			current_cols = self.columns()
+			new_cols = set(current_cols).difference(kwargs.keys())
+			if new_cols:
+				if not current_cols:
+					self._create(new_cols)
+				else:
+					self._add_columns(new_cols)
+			cmd = """
+				CREATE %s INDEX IF NOT EXISTS %s ON %s(%s)
+			"""%('UNIQUE' if unique else '', index_name, self.name, cols)
+			self(cmd)
+
+		def drop_index(self, **kwargs):
+			cols, index_name = self._index_pattern(kwargs)
+			cmd = '''DROP INDEX IF EXISTS "%s"'''%index_name
+			self(cmd)
+
+		def indexes(self):
+			cmd = '''PRAGMA index_list(%s);'''%self.name
+			v = self(cmd)
+			pass			
+
 	def __init__(self, directory=DEFAULT):
 		self.directory = directory if directory is not DEFAULT else './databases/'
 		self._dbs = {}
@@ -351,6 +420,9 @@ class Storage(object):
 				o = cursor.executemany(*c) if many else cursor.execute(*c)
 			except sqlite3.OperationalError, e:
 				raise RuntimeError("%s"%e)
+
+	def __getattr__(self, name):
+		return Storage.Collection(self, name)
 
 	__call__ = execute
 
