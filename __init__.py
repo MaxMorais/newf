@@ -259,7 +259,7 @@ class Storage(object):
 			self.database = database
 			self.name = `name`
 		def __call__(self, *args, **kwargs):
-			return self.database(*args, *kwargs)
+			return self.database(*args, **kwargs)
 
 		def __repr__(self):
 			return 'Collection %s'%self.name
@@ -280,7 +280,7 @@ class Storage(object):
 
 		def _create(self, columns):
 			self._validate_column_names(columns)
-			self('CREATE TABLE IF NOT EXISTS %s (%s)'%(self.name, ', '.join(map(lambda x: '"%s"', columns)))
+			self('CREATE TABLE IF NOT EXISTS %s (%s)'%(self.name, ', '.join(map(lambda x: '"%s"', columns))))
 
 		def insert(self, d=None, on_conflict=DEFAULT, **kwargs):
 			assert (on_conflict is DEFAULT or str(on_conflict).lower() in 'rollback,abort,fail,ignore,replace'.join()), 'see http://www.sqlite.org/lang_conflict.html'
@@ -290,7 +290,7 @@ class Storage(object):
 			elif isinstance(d, dict): 
 				d.update(kwargs)
 			elif isinstance(d, list):
-				many = all([isinstance(arg, (dict) for arg in d])
+				many = all([isinstance(arg, dict) for arg in d])
 
 			if not many and isinstance(d, list):
 				keys = set().union(*d)
@@ -309,10 +309,10 @@ class Storage(object):
 
 				if many is True:
 					for cols, data in self._constant_key_grouping(d):
-						cmd = self._insert_stamente(self.name, cols, on_conflict)
+						cmd = self._insert_stamente(cols, on_conflict)
 						self(cmd, data)
 				else:
-					cmd = self._insert_stamente(self.name, d.keys(), on_conflict)
+					cmd = self._insert_stamente(d.keys(), on_conflict)
 					self(cmd, d.values())
 
 		def rename(self, new_name):
@@ -326,14 +326,14 @@ class Storage(object):
 			fields = self._columns() if fields is None else fields
 			other = collection.columns()
 			cols = set(fields).difference(other)
-			with self.database.lock()
+			with self.database.lock():
 				if not other:
 					collection._create(cols)
 				elif cols:
 					collection._add_columns(cols)
 
 				c = ','.join(['"%s"'%x for x in fields])
-				cmd '''INSERT INTO %s (%s) SELECT %s FROM %s %s'''%(
+				cmd = '''INSERT INTO %s (%s) SELECT %s FROM %s %s'''%(
 					collection.name, c, c, self.name, self._where_clause(query, kwargs)
 				)
 				self(cmd)
@@ -343,7 +343,7 @@ class Storage(object):
 			if new_cols:
 				self._add_columns(new_cols)
 
-			values = tuple([self.database._coerce_(x) for x in d.values())
+			values = tuple([self.database._coerce_(x) for x in d.values()])
 			s = ','.join(['"%s"=? '%x for x in d.keys()])
 			cmd = '''UPDATE %s SET %s %s'''%(self.name, s, self._where_clause(query, kwargs))
 			self(cmd, values)
@@ -386,8 +386,145 @@ class Storage(object):
 
 		def indexes(self):
 			cmd = '''PRAGMA index_list(%s);'''%self.name
-			v = self(cmd)
-			pass			
+			v = []
+			for x in self(cmd):
+				d = {}
+				for a in x[1].split('_')[:1]:
+					d[a[:-3]] = 1 if a.endswith('ASC') else -1
+					v.append(d)
+			return v
+
+		def _columns(self):
+			a = self('''PRAGMA table_info(%s);'''%self.name)
+			if a is None:
+				return []
+			return [x[1] for x in a]
+
+		def columns(self):
+			return filter(lambda x:x!='rowid', self._columns())
+
+		def _add_columns(self, new_columns):
+			self._validate_column_names(new_columns)
+			for col in new_columns:
+				with self.database.lock():
+					try:
+						self('ALTER TABLE %s ADD COLUMN "%s"')%(self.name, col)
+					except RuntimeError, e:
+						raise
+
+		def find_one(self, *args, **kwargs):
+			v = list(self.find(*args, limit=1, **kwargs))
+			if not v:
+				return None
+			return v[0]
+
+		def _where_clause(self, query, kwargs):
+			if kwargs:
+				for key, val in kwargs.iteritems():
+					val = self.database._coerce_(val)
+					if query:
+						query += ' AND %s=%r'%(key, val)
+					else:
+						query += ' %s=%r'%(key, val)
+			return (' WHERE ' + query) if query else ''
+
+		def _find_cmd(self, query='', fields=None, limit=None, offset=0,
+			order_by=None, group_by=None, page_size=50, _rowid=False, 
+			_count=False, **kwargs):
+			cmd = '''SELECT%s'''%(' rowid,' if rowid else '')
+			if fields is None:
+				fields = self.columns()
+			if _count:
+				if count is True:
+					_count = '*'
+				if isinstance(_count, (basestring, list, tuple, set)):
+					if isinstance(_count, basestring):
+						_count = _count.split(',')
+					if group_by:
+						if isinstance(group_by, (basestring, list, tuple, set)):
+							if isinstance(group_by, basestring):
+								group_by=group_by.split(',')
+							cmd += ', '.join('%s'%c.strip() for c in group_by)
+					cmd += ', '.join(['COUNT(%r)'%c.strip() for c in _count])
+					cmd += ' FROM %s'%self.name
+			else:
+				fields  = ', '.join(['%r'%col for col in fields])
+				cmd += "%s FROM %s"%(fields, self.name)
+
+			cmd += self._where_clause(query, kwargs)
+
+			if order_by:
+				if isinstance(order_by, (basestring, list, tuple, set, dict)):
+					if isinstance(order_by, basestring):
+						order_by = order_by.split(',')
+					if isinstance(order_by, dict):
+						order_by = ['%r %s'(k, 'ASC' if v else 'DESC') for (k,v) in order_by.iteritems()]
+					cmd += ' ORDER BY %s '%(','.join(['%r' for c in group_by]))
+
+			if group_by:
+				if isinstance(group_by, (basestring, list, tuple, set)):
+					if isinstance(group_by, basestring):
+						group_by = group_by.split(',')
+					cmd += ' GROUP BY %s '%(','.join(['%r' for c in group_by]))
+
+			if page_size:
+				page_size = int(page_size)
+
+			if limit:
+				cmd += ' LIMIT %r'%int(limit)
+			else:
+				cmd += ' LIMIT %r'%page_size
+
+			if offset:
+				cmd += ' OFFSET %s'%int(offset)
+
+			return cmd
+
+		def find(self, query='', fields=None, limit=None, offset=0,
+			order_by=None, group_by=None, page_size=50, _rowid=False, 
+			_count=False, **kwargs):
+			cmd = self._find_cmd(query, fields, limit, offset, order_by, group_by,
+				page_size, _rowid, _count, **kwargs)
+			convert = self.database._coerce_back
+			while True:
+				cols = self._columns()
+				if not cols:
+					return
+				v = self(cmd)
+				if fields is None:
+					fields = cols
+				if _rowid and 'rowid' not in fields:
+					fields.insert(0, 'rowid')
+
+				for x  in v:
+					yield dict([a for a in zip(columns, [convert(y) for y in x]) 
+						if a[1] is not None])
+
+				if limit is not None or not v:
+					return
+				i = cmd.rfind('OFFSET')
+				offset += page_size
+				cmd += cmd[:1] + 'OFFSET %s'%offset
+
+		def __iter__(self):
+			return self.find()
+
+		def _insert_statement(self, cols, on_conflict):
+			conflict = (' OR %s'%on_conflict) if on_conflict is not DEFAULT else ''
+			cols = ['%r' for c in cols]
+			return 'INSERT %s INTO %s (%s) VALUES (%s)'%(conflict, self.name, ','.join(cols), ','.join(['?']*len(cols)))
+
+		@staticmethod
+		def _constant_key_grouping(d):
+			x = {}
+			for a in d:
+				k = tuple(a.keys())
+				if x.has_key(k):
+					x[k].append(a)
+				else:
+					x[k] = [a]
+			return x.values()
+
 
 	def __init__(self, directory=DEFAULT):
 		self.directory = directory if directory is not DEFAULT else './databases/'
@@ -399,12 +536,12 @@ class Storage(object):
 		return 'Storage connected on:\n - %s'%'\n'.join(self._dbs.keys())
 
 	def connect(self, file=DEFAULT):
-		file = os.path.join(os.path.join(os.directory, file)) if file not is DEFAULT else ':memory:'
+		file = os.path.join(os.path.join(os.directory, file)) if file is not DEFAULT else ':memory:'
 		if not self._dbs.has_key(file):
 			self._dbs[file] = sqlite3.connect(file)
 		return self._dbs[file]
 
-	def execute(self, statement, args, file=DEFAULT):
+	def execute(self, statement, args=[], file=DEFAULT):
 		db = self.connect(file)
 		self._current_cursor = db.cursor()
 		many = False
@@ -415,11 +552,18 @@ class Storage(object):
 			if many:
 				args = map(lambda x: tuple(x), args)
 			statement.append(args)
-		with self.lock():
+		if not args:
 			try:
-				o = cursor.executemany(*c) if many else cursor.execute(*c)
+				o =  self.cursor.execute(statement)
 			except sqlite3.OperationalError, e:
 				raise RuntimeError("%s"%e)
+
+		else:
+			with self.lock():
+				try:
+					o = cursor.executemany(*c) if many else cursor.execute(*c)
+				except sqlite3.OperationalError, e:
+					raise RuntimeError("%s"%e)
 
 	def __getattr__(self, name):
 		return Storage.Collection(self, name)
@@ -429,7 +573,7 @@ class Storage(object):
 	def _coerce_(self, x):
 		if isinstance(x, bool): x = int(x)
 		elif isinstance(x, (str, int, long, float)): pass
-		elif x if None: pass
+		elif x is None: pass
 		elif isinstance(x, unicode): x = x.decode('utf-8')
 		else: x = '__pickle'+base64.b64encode(zlib.compress(cPickle.dumps(x,2)))
 		return x
