@@ -157,7 +157,6 @@ class Application(object):
 		self.system_error_msg = system_error_msg
 		if urls is not None: 
 			self._raw_urls += urls
-		self.urls = tuple([(re.compile(a), b) for (a,b) in self._raw_urls])
 
 	@classmethod
 	def route(cls, route_or_function=None, slashed=False, pattern=None):
@@ -199,7 +198,7 @@ class Application(object):
 	
 	@classproperty
 	def request(cls):
-		if not hasattr(self, '_lazy_request'):
+		if not hasattr(cls, '_lazy_request'):
 			return None
 		return cls._lazy_request
 
@@ -217,7 +216,7 @@ class Application(object):
 			# inject a alias for redirect
 			nglobals['redirect'] = context.redirect
 			# inject a alias for request
-			nglobals['request'] = conext.request
+			nglobals['request'] = context.request
 
 			return FunctionType(
 				function.func_code,
@@ -226,13 +225,11 @@ class Application(object):
 				function.func_defaults,
 				function.func_closure            
 			)
-
-		for pattern, callback in self.urls:
-			match = pattern.match(environ['PATH_INFO'])
-			if match:
+		
+		for pattern, controller in self._raw_urls:
+			if re.match(pattern, environ['PATH_INFO']):
 				try:
-					#request, **match.groupdict()
-					response = inject_context(self, callback)()
+					response = inject_context(self, controller)()
 				except Exception, e:
 					msg = self.system_error_msg % e
 					if self.debug:
@@ -240,7 +237,6 @@ class Application(object):
 					response = Response(msg, status_code=500)
 				finally:
 					break
-
 		if not isinstance(response, Response):
 			if hasattr(self, 'not_found'):
 				response = self.not_found(request)
